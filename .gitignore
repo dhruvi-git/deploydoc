@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.terraform/
+*.tfstate*
+.env
+*.zip
+results/
+venv/
+venv
+password.txt

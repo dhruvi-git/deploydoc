@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+requests>=2.32
+boto3>=1.34
+google-genai>=1.30
+google-cloud-logging>=3.10
+azure-identity>=1.17
+azure-monitor-query>=1.4

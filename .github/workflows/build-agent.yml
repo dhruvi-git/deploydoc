@@ -1,0 +1,27 @@
+name: build-agent
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["agent/**"]
+
+env:
+  GCP_REGION: asia-south1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+      - name: Build and push agent image
+        run: |
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/deploydoc/agent"
+          docker build -t "$IMAGE:latest" -t "$IMAGE:${GITHUB_SHA::7}" agent
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:${GITHUB_SHA::7}"

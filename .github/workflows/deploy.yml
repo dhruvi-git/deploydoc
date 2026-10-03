@@ -1,0 +1,198 @@
+name: deploy-target
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "Failure to inject (none = healthy deploy)"
+        type: choice
+        default: none
+        options: [none, missing_env, bad_port, bad_image_tag, bad_credentials, bad_resources]
+  push:
+    branches: [main]
+    paths: ["sample-app/**", "infra/**", "scripts/**", ".github/workflows/deploy.yml"]
+
+env:
+  SCENARIO: ${{ inputs.scenario || 'none' }}
+  GCP_REGION: asia-south1
+  AWS_REGION: ap-south-1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      ghcr_image: ${{ steps.meta.outputs.ghcr_image }}
+      gar_image: ${{ steps.meta.outputs.gar_image }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=ghcr.io/${owner}/deploydoc-target" >> "$GITHUB_OUTPUT"
+          echo "gar_image=${GCP_REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/deploydoc/deploydoc-target" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+      - name: Build and push image
+        env:
+          GHCR: ${{ steps.meta.outputs.ghcr_image }}
+          GAR: ${{ steps.meta.outputs.gar_image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          docker build --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            -t "$GHCR:$TAG" -t "$GAR:$TAG" sample-app
+          docker push "$GHCR:$TAG"
+          docker push "$GAR:$TAG"
+      - name: Package Lambda
+        run: cd sample-app/aws_lambda && zip -j "$GITHUB_WORKSPACE/lambda.zip" handler.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-zip
+          path: lambda.zip
+
+  deploy-gcp:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: Choose inputs for this scenario
+        run: |
+          IMAGE="${{ needs.build.outputs.gar_image }}:${TAG}"
+          PORT=8080; CPU=1; MEM=512Mi; DB="sqlite:///demo.db"
+          case "$SCENARIO" in
+            missing_env)   DB="" ;;
+            bad_port)      PORT=3000 ;;
+            bad_image_tag) IMAGE="${{ needs.build.outputs.gar_image }}:v-does-not-exist" ;;
+            bad_resources) CPU=4; MEM=256Mi ;;
+          esac
+          {
+            echo "TF_VAR_image=$IMAGE"
+            echo "TF_VAR_container_port=$PORT"
+            echo "TF_VAR_cpu=$CPU"
+            echo "TF_VAR_memory=$MEM"
+            echo "TF_VAR_database_url=$DB"
+            echo "TF_VAR_app_version=$TAG"
+            echo "TF_VAR_project_id=${{ vars.GCP_PROJECT_ID }}"
+            echo "TF_VAR_region=$GCP_REGION"
+          } >> "$GITHUB_ENV"
+      - name: Terraform init
+        working-directory: infra/terraform
+        run: terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+      - name: Terraform apply
+        working-directory: infra/terraform
+        run: terraform apply -auto-approve -input=false
+      - name: Smoke test
+        working-directory: infra/terraform
+        run: |
+          URL=$(terraform output -raw url)
+          bash "$GITHUB_WORKSPACE/scripts/smoke_test.sh" "$URL/health" "$TAG"
+
+  deploy-azure:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+      APP: ${{ vars.AZURE_CONTAINER_APP }}
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Deploy to Azure Container Apps
+        run: |
+          az config set extension.use_dynamic_install=yes_without_prompt
+          IMAGE="${{ needs.build.outputs.ghcr_image }}:${TAG}"
+          PORT=8080
+          case "$SCENARIO" in
+            bad_port)      PORT=3000 ;;
+            bad_image_tag) IMAGE="${{ needs.build.outputs.ghcr_image }}:v-does-not-exist" ;;
+          esac
+          SUFFIX="r${{ github.run_number }}-${{ github.run_attempt }}"
+          az containerapp ingress update -n "$APP" -g "$RG" --target-port "$PORT"
+          if [ "$SCENARIO" = "missing_env" ]; then
+            az containerapp update -n "$APP" -g "$RG" --image "$IMAGE" --revision-suffix "$SUFFIX" \
+              --set-env-vars APP_VERSION="$TAG" --remove-env-vars DATABASE_URL
+          else
+            az containerapp update -n "$APP" -g "$RG" --image "$IMAGE" --revision-suffix "$SUFFIX" \
+              --set-env-vars APP_VERSION="$TAG" DATABASE_URL="sqlite:///demo.db"
+          fi
+      - name: Smoke test
+        run: |
+          FQDN=$(az containerapp show -n "$APP" -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)
+          bash scripts/smoke_test.sh "https://$FQDN/health" "$TAG"
+
+  deploy-aws:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+      FN: deploydoc-target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: lambda-zip
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.SCENARIO == 'bad_credentials' && 'wrongWRONGwrongWRONGwrongWRONGwrong0000' || secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+      - name: Deploy Lambda
+        run: |
+          aws lambda update-function-code --function-name "$FN" --zip-file fileb://lambda.zip > /dev/null
+          aws lambda wait function-updated --function-name "$FN"
+          if [ "$SCENARIO" = "missing_env" ]; then
+            ENVJSON=$(jq -nc --arg v "$TAG" '{Variables:{APP_VERSION:$v}}')
+          else
+            ENVJSON=$(jq -nc --arg v "$TAG" '{Variables:{APP_VERSION:$v,DATABASE_URL:"sqlite:///demo.db"}}')
+          fi
+          aws lambda update-function-configuration --function-name "$FN" --environment "$ENVJSON" > /dev/null
+          aws lambda wait function-updated --function-name "$FN"
+      - name: Smoke test
+        env:
+          AWS_TARGET_URL: ${{ vars.AWS_TARGET_URL }}
+        run: bash scripts/smoke_test.sh "${AWS_TARGET_URL%/}/health" "$TAG"
+
+  notify:
+    needs: [build, deploy-gcp, deploy-azure, deploy-aws]
+    if: ${{ always() && contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report failure to DeployDoc
+        env:
+          WEBHOOK_URL: ${{ vars.DEPLOYDOC_WEBHOOK_URL }}
+          WEBHOOK_TOKEN: ${{ secrets.DEPLOYDOC_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          WORKFLOW: ${{ github.workflow }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          payload=$(jq -nc \
+            --arg repo "$GITHUB_REPOSITORY" --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$ATTEMPT" --arg sha "$GITHUB_SHA" --arg branch "$BRANCH" \
+            --arg actor "$ACTOR" --arg workflow "$WORKFLOW" \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{repo:$repo,run_id:$run_id,run_attempt:$run_attempt,sha:$sha,branch:$branch,actor:$actor,workflow:$workflow,run_url:$run_url}')
+          curl -sS --max-time 200 -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" -H "X-DeployDoc-Token: $WEBHOOK_TOKEN" -d "$payload"

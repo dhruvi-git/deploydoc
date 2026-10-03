@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeployDoc</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--paper:#f5f7f9;--card:#fff;--ink:#17202b;--mute:#5c6b7a;--rule:#d9e0e7;--fail:#b8352b;--ok:#1d7a58;--wait:#8a6a00;
+--aws:#a85a00;--aws-bg:#fdeed8;--azure:#1d5bb8;--azure-bg:#e2edfb;--gcp:#17703f;--gcp-bg:#dff3e7}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 "Public Sans",system-ui,sans-serif}
+header{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;border-bottom:1px solid var(--rule);background:var(--card)}
+h1{font:600 22px "Newsreader",Georgia,serif;margin:0}
+header span{color:var(--mute);font-size:13px;margin-left:12px}
+button{font:inherit;border:1px solid var(--rule);background:var(--card);padding:6px 12px;border-radius:6px;cursor:pointer;color:var(--ink)}
+button:hover{border-color:var(--ink)} :focus-visible{outline:2px solid var(--azure);outline-offset:2px}
+main{display:grid;grid-template-columns:340px 1fr;min-height:calc(100vh - 58px)}
+#list{border-right:1px solid var(--rule);overflow:auto;max-height:calc(100vh - 58px)}
+.item{padding:14px 18px;border-bottom:1px solid var(--rule);cursor:pointer;border-left:4px solid transparent}
+.item:hover{background:#eef2f6}.item.sel{background:#fff;border-left-color:var(--fail)}
+.item .t{font-weight:500}.item .m{color:var(--mute);font-size:12.5px;margin-top:2px}
+.chip{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:500;margin:4px 4px 0 0}
+.aws{background:var(--aws-bg);color:var(--aws)}.azure{background:var(--azure-bg);color:var(--azure)}.gcp{background:var(--gcp-bg);color:var(--gcp)}
+.cat{background:#eceff3;color:var(--ink)}.st-investigating{color:var(--wait)}.st-agent_error{color:var(--fail)}
+#detail{padding:28px 36px;max-width:900px}
+.empty{color:var(--mute);padding:40px}
+.diag{font:500 28px/1.25 "Newsreader",Georgia,serif;margin:6px 0 14px}
+.meter{height:6px;background:var(--rule);border-radius:3px;width:200px;margin:6px 0 2px}.meter i{display:block;height:100%;background:var(--ok);border-radius:3px}
+h3{font:600 13px "Public Sans";margin:30px 0 8px;color:var(--mute)}
+.root{font:500 18px/1.5 "Newsreader",Georgia,serif;max-width:68ch}
+blockquote{margin:0 0 10px;padding:8px 12px;background:var(--card);border-left:3px solid var(--fail);font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+blockquote small{display:block;font:500 12px "Public Sans";color:var(--mute);margin-bottom:3px}
+ol{padding-left:20px;max-width:70ch}li{margin-bottom:4px}
+pre{background:#101820;color:#e6edf3;padding:12px;border-radius:6px;overflow:auto;font-size:12.5px}
+.trace{border-left:2px solid var(--rule);margin-left:6px;padding-left:16px}
+.step{position:relative;margin-bottom:12px}.step:before{content:"";position:absolute;left:-23px;top:6px;width:10px;height:10px;border-radius:50%;background:var(--ink)}
+.step.aws:before{background:var(--aws)}.step.azure:before{background:var(--azure)}.step.gcp:before{background:var(--gcp)}.step.github:before{background:#6e40c9}
+.step b{font-weight:600}.step code{display:block;color:var(--mute);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+dialog{border:1px solid var(--rule);border-radius:10px;padding:24px;width:min(460px,92vw)}
+dialog label{display:block;font-weight:500;margin-top:12px}dialog input{width:100%;padding:8px;border:1px solid var(--rule);border-radius:6px;font:inherit}
+@media(max-width:800px){main{grid-template-columns:1fr}#list{max-height:260px;border-right:0}#detail{padding:20px}}
+</style>
+</head>
+<body>
+<header><div><h1 style="display:inline">DeployDoc</h1><span>failed deployments, diagnosed</span></div><button id="settings">Connection</button></header>
+<main><nav id="list" aria-label="Incidents"></nav><section id="detail"><div class="empty">Select an incident.</div></section></main>
+<dialog id="dlg"><form method="dialog">
+<h2 style="margin-top:0;font-family:Newsreader,serif">Connect to your agent</h2>
+<label>Agent URL (Cloud Run)<input id="api" placeholder="https://deploydoc-agent-xxxxx.asia-south1.run.app"></label>
+<label>Dashboard key<input id="key" type="password" autocomplete="off"></label>
+<p style="margin-bottom:0"><button id="save" value="ok">Save</button></p></form></dialog>
+<script>
+const $=s=>document.querySelector(s);
+const esc=t=>String(t??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let selected=null;
+const cfg=()=>({api:(localStorage.dd_api||"").replace(/\/$/,""),key:localStorage.dd_key||""});
+async function call(path){const {api,key}=cfg();const r=await fetch(api+path,{headers:{"X-API-Key":key}});
+  if(!r.ok)throw new Error(r.status===401?"Wrong dashboard key":"Agent returned "+r.status);return r.json();}
+const chips=a=>(a||[]).map(c=>`<span class="chip ${esc(c)}">${esc(c.toUpperCase())}</span>`).join("");
+const ago=iso=>{if(!iso)return"";const s=(Date.now()-new Date(iso))/1000;return s<90?"just now":s<5400?Math.round(s/60)+" min ago":s<129600?Math.round(s/3600)+" h ago":Math.round(s/86400)+" d ago"};
+
+async function loadList(){
+  try{const {incidents}=await call("/api/incidents");
+    $("#list").innerHTML=incidents.length?incidents.map(i=>`<div class="item ${i.incident_id===selected?"sel":""}" data-id="${esc(i.incident_id)}" tabindex="0">
+      <div class="t">${esc(i.summary||(i.status==="investigating"?"Investigating...":"No diagnosis"))}</div>
+      <div class="m">${esc(i.repo)} · ${esc((i.sha||"").slice(0,7))} · ${ago(i.created_at)}</div>
+      <div>${chips(i.affected_clouds)}${i.category?`<span class="chip cat">${esc(i.category)}</span>`:""}<span class="chip st-${esc(i.status)}">${esc(i.status)}</span></div></div>`).join(""):'<div class="empty">No incidents yet. Trigger a failing deploy.</div>';
+  }catch(e){$("#list").innerHTML=`<div class="empty">${esc(e.message)}. Check Connection.</div>`}
+}
+async function show(id){
+  selected=id;const i=await call("/api/incidents/"+encodeURIComponent(id));const d=i.diagnosis||{};
+  if(!d.summary){$("#detail").innerHTML=`<div class="empty">${esc(i.status==="investigating"?"The agent is still investigating...":"No diagnosis. "+(i.error||""))}</div>`;return}
+  $("#detail").innerHTML=`
+   <div>${chips(d.affected_clouds)}<span class="chip cat">${esc(d.category)}</span></div>
+   <div class="diag">${esc(d.summary)}</div>
+   <div class="meter" title="Confidence"><i style="width:${+d.confidence||0}%"></i></div>
+   <div style="color:var(--mute);font-size:13px">${+d.confidence||0}% confident · ${esc(i.duration_s)}s · ${esc(i.model)} · <a href="${esc(i.run_url)}" target="_blank" rel="noopener">CI run</a>${i.issue_url?` · <a href="${esc(i.issue_url)}" target="_blank" rel="noopener">GitHub issue</a>`:""}</div>
+   <h3>Root cause</h3><div class="root">${esc(d.root_cause)}</div>
+   <h3>Evidence</h3>${(d.evidence||[]).map(e=>`<blockquote><small>${esc(e.source)}</small>${esc(e.excerpt)}</blockquote>`).join("")||"None"}
+   <h3>How to fix it</h3><ol>${(d.fix_steps||[]).map(s=>`<li>${esc(s)}</li>`).join("")}</ol>
+   ${d.suggested_patch?`<pre>${esc(d.suggested_patch)}</pre>`:""}
+   <h3>Blast radius</h3><div>${esc(d.blast_radius)||"n/a"}</div>
+   <h3>How the agent investigated</h3><div class="trace">${(i.trace||[]).map(t=>`<div class="step ${esc(t.cloud)}"><b>${esc(t.tool)}</b><code>${esc(JSON.stringify(t.args))}</code></div>`).join("")}</div>`;
+  loadList();
+}
+$("#list").addEventListener("click",e=>{const it=e.target.closest(".item");if(it)show(it.dataset.id)});
+$("#list").addEventListener("keydown",e=>{if(e.key==="Enter"){const it=e.target.closest(".item");if(it)show(it.dataset.id)}});
+$("#settings").onclick=()=>{$("#api").value=localStorage.dd_api||"";$("#key").value=localStorage.dd_key||"";$("#dlg").showModal()};
+$("#save").onclick=()=>{localStorage.dd_api=$("#api").value.trim();localStorage.dd_key=$("#key").value.trim();setTimeout(loadList,50)};
+if(!cfg().api)$("#dlg").showModal();
+loadList();setInterval(()=>{loadList();if(selected)show(selected).catch(()=>{})},15000);
+</script>
+</body>
+</html>
