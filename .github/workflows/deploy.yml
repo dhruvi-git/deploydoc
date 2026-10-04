@@ -131,10 +131,10 @@ jobs:
           SUFFIX="r${{ github.run_number }}-${{ github.run_attempt }}"
           az containerapp ingress update -n "$APP" -g "$RG" --target-port "$PORT"
           if [ "$SCENARIO" = "missing_env" ]; then
-            az containerapp update -n "$APP" -g "$RG" --image "$IMAGE" --revision-suffix "$SUFFIX" \
+            az containerapp update -n "$APP" -g "$RG" --image "$IMAGE"  \
               --set-env-vars APP_VERSION="$TAG" --remove-env-vars DATABASE_URL
           else
-            az containerapp update -n "$APP" -g "$RG" --image "$IMAGE" --revision-suffix "$SUFFIX" \
+            az containerapp update -n "$APP" -g "$RG" --image "$IMAGE"  \
               --set-env-vars APP_VERSION="$TAG" DATABASE_URL="sqlite:///demo.db"
           fi
       - name: Smoke test
